@@ -6,18 +6,12 @@ uses
   overrides,
   {$IFDEF RPI}
   RaspberryPi,
-  BCM2835,
-  BCM2708,
   {$ENDIF}
   {$IFDEF RPI3}
   RaspberryPi3,
-  BCM2837,
-  BCM2710,
   {$ENDIF}
   {$IFDEF RPI4}
   RaspberryPi4,
-  BCM2838,
-  BCM2711,
   {$ENDIF}
   GlobalConfig,
   GlobalConst,
@@ -32,13 +26,9 @@ uses
   RemoteShell,
   logoutput,
   console,
-  framebuffer,
-  gpio,
-  mmc,
   devices,
+  MMC,
   wifidevice,
-  Ultibo,
-//  vishell,
   Logging,
   Network,
   Winsock2,
@@ -47,9 +37,8 @@ uses
   WebStatus,
   Serial,
   ip,
-  transport;
-
-//{$DEFINE SERIAL_LOGGING}
+  transport,
+  Iphlpapi;
 
 const
    // copied from font as it's in the implementation section there.
@@ -317,7 +306,6 @@ var
   key : string;
   Country : string;
   TopWindow : THandle;
-  Winsock2TCPClient : TWinsock2TCPClient;
   IPAddress : string;
   i : integer;
   HTTPListener : THTTPListener;
@@ -342,47 +330,145 @@ begin
 end;
 
 procedure WaitForIP;
+
 {$ifndef oldipdetect}
-var
-  WiredAdapter : twiredadapter;
-  IPTransport : TIPTransport;
-  IPTransportAdapter : TIPTransportAdapter;
-{$endif}
-begin
-  {$ifndef oldipdetect}
-  // locate network WiredAdapter
-  WiredAdapter := TWiredAdapter(AdapterManager.GetAdapterByDevice(PNetworkDevice(CYW43455Network), false, 0));
-
-  // locate IP transport
-  IPTransport := TIPTransport(TransportManager.GetTransportByName(IP_TRANSPORT_NAME, false, 0));
-
-  // locate IP transport WiredAdapter
-  IPTransportAdapter := TIPTransportAdapter(IPTransport.GetAdapterByNext(nil,False,False,NETWORK_LOCK_READ));
-  while IPTransportAdapter <> nil do
+  function GetMACAddress(const AdapterName: String): String;
+  // Get the MAC address of an adapter using the IP Helper API
+  var
+    Size:LongWord;
+    Count: LongWord;
+    Name: String;
+    IfTable: PMIB_IFTABLE;
+    IfRow: PMIB_IFROW;
+    HardwareAddress: THardwareAddress;
   begin
-    if IPTransportAdapter.Adapter = tnetworkadapter(WiredAdapter) then
-      break;
-
-    IPTransportAdapter := TIPTransportAdapter(IPTransport.GetAdapterByNext(IPTransportAdapter,False,False,NETWORK_LOCK_READ));
-  end;
-
-  // wait for IP address to update
-  IPAddress := '0.0.0.0';
-  while IPAddress = '0.0.0.0' do
-  begin
-    sleep(200);
-    try
-      IPAddress := InAddrToString(InAddrToNetwork(IPTransportAdapter.Address));
-    except
-      // The InAddrToNetwork call here^^^ sometimes crashes. Maybe the RTL
-      // is changing the objects after we've looked them up.
-      IPAddress := '0.0.0.0';
+    Result := '';
+  
+    // Get number of network interfaces
+    GetNumberOfInterfaces(Count);
+  
+    if Count > 0 then
+    begin
+      Size := SizeOf(MIB_IFTABLE) + (Count * SizeOf(MIB_IFROW));
+      IfTable := GetMem(Size);
+      if IfTable <> nil then
+      begin
+        // Get the network interface table
+        if GetIfTable(IfTable, Size, False) = ERROR_SUCCESS then
+        begin
+          // Get first row
+          IfRow := @IfTable^.table[0];
+  
+          Count := 0;
+          while Count < IfTable^.dwNumEntries do
+          begin
+            Name := IfRow^.wszName;
+            
+            // Check name
+            if Uppercase(Name) = Uppercase(AdapterName) then
+            begin
+              // Check address size
+              if IfRow^.dwPhysAddrLen = SizeOf(THardwareAddress) then
+              begin
+                System.Move(IfRow^.bPhysAddr[0], HardwareAddress[0], HARDWARE_ADDRESS_SIZE);
+                Result := HardwareAddressToString(HardwareAddress);
+                Exit;
+              end;
+            end;
+  
+            // Get next row
+            Inc(Count);
+            Inc(IfRow);
+          end;
+        end;
+  
+        FreeMem(IfTable);
+      end;
     end;
   end;
+  
+  function GetIPAddress(const AdapterName: String): String;
+  // Get the IP address of an adapter using the IP Helper API
+  var
+    Size: LongWord;
+    Count: Integer;
+    Address: String;
+    MACAddress: String;
+    IpNetTable: PMIB_IPNETTABLE;
+    IpNetRow: PMIB_IPNETROW;
+    IPAddress: TInAddr;
+    HardwareAddress: THardwareAddress;
+  begin
+    Result := '';
+  
+    // Get the MAC address
+    MACAddress := GetMacAddress(AdapterName);
+    if Length(MACAddress) = 0 then
+      Exit;
+  
+    // Get the ip net table (ARP table)
+    // First get the size
+    Size := 0;
+    IpNetTable := nil;
+    if (GetIpNetTable(nil, Size, False) = ERROR_INSUFFICIENT_BUFFER) and (Size > 0) then // First call with zero size
+    begin
+      IpNetTable := GetMem(Size);
+    end;
+    if IpNetTable <> nil then
+    begin
+      // Now get the table
+      if GetIpNetTable(IpNetTable, Size, False) = ERROR_SUCCESS then
+      begin
+        // Get first row
+        IpNetRow := @IpNetTable^.table[0];
+  
+        Count := 0;
+        while Count < IpNetTable^.dwNumEntries do
+        begin
+          // Check address size
+          if IpNetRow^.dwPhysAddrLen = SizeOf(THardwareAddress) then
+          begin
+            // Get the address
+            System.Move(IpNetRow^.bPhysAddr[0], HardwareAddress[0], HARDWARE_ADDRESS_SIZE);
+            Address := HardwareAddressToString(HardwareAddress);
+            
+            // Check the address
+            if Uppercase(Address) = Uppercase(MACAddress) then
+            begin
+              IPAddress.S_addr := IpNetRow^.dwAddr;
+              Result := InAddrToString(IPAddress);
+            end;
+          end;
+  
+          // Get next row
+          Inc(Count);
+          Inc(IpNetRow);
+        end;
+      end;
+  
+      FreeMem(IpNetTable);
+    end;
+  end;
+{$else}  
+var
+  Winsock2TCPClient : TWinsock2TCPClient;
+{$endif}
+begin
+  
+  {$ifndef oldipdetect}
+  // wait for IP address to update
+  IPAddress := GetIPAddress(DeviceGetName(PDevice(CYW43455Network)));
+  while (IPAddress = '') or (IPAddress = '0.0.0.0') do
+  begin
+    sleep(200);
+
+    IPAddress := GetIPAddress(DeviceGetName(PDevice(CYW43455Network)));
+  end;
+
  {$else}
 
   Winsock2TCPClient:=TWinsock2TCPClient.Create;
-
+  IPAddress := '0.0.0.0';
   while (true) do
   begin
     sleep(200);
@@ -395,7 +481,7 @@ begin
     end;
   end;
 
-{$endif}
+  {$endif}
 
   ConsoleWindowWriteln(TopWindow, 'IP Address=' + IPAddress);
 end;
@@ -436,12 +522,9 @@ var
   CPUWindow : TWindowHandle;
   WIFIDeviceP : PWIFIDevice;
 
-
 begin
-  ConsoleFramebufferDeviceAdd(FramebufferDeviceGetDefault);
-  CONSOLE_LOGGING_POSITION := CONSOLE_POSITION_RIGHT;
-  TopWindow := ConsoleWindowCreate(ConsoleDeviceGetDefault, CONSOLE_POSITION_LEFT,TRUE);
-  CPUWindow := ConsoleWindowCreate(ConsoleDeviceGetDefault, CONSOLE_POSITION_BOTTOMLEFT, FALSE);
+  TopWindow := ConsoleWindowCreate(ConsoleDeviceGetDefault, {$IFDEF SERIAL_LOGGING}CONSOLE_POSITION_TOP{$ELSE}CONSOLE_POSITION_LEFT{$ENDIF},TRUE);
+  CPUWindow := ConsoleWindowCreate(ConsoleDeviceGetDefault, {$IFDEF SERIAL_LOGGING}CONSOLE_POSITION_BOTTOM{$ELSE}CONSOLE_POSITION_BOTTOMLEFT{$ENDIF}, FALSE);
 
   LOGGING_INCLUDE_TICKCOUNT := True;
   {$IFDEF SERIAL_LOGGING}
@@ -460,7 +543,6 @@ begin
   HTTPListener:=THTTPListener.Create;
   HTTPListener.Active:=True;
   WebStatusRegister(HTTPListener,'','',True);
-
 
   WIFI_LOG_ENABLED := true;
 
@@ -564,8 +646,7 @@ begin
         ConsoleWindowWriteln(TopWindow, 'Letting the Cypress firmware determine the best network interface from the SSID');
 
       status := WirelessJoinNetwork(SSID, Key, Country, WIFIJoinBlocking, WIFIReconnectAlways, BSSID, (BSSIDStr <> ''));
-      IPAddress := '0.0.0.0';
-      if (status = WIFI_STATUS_SUCCESS) then
+      if (status = MMC_STATUS_SUCCESS) then
       begin
 
         ConsoleWindowWriteln(topwindow, 'Network joined, waiting for an IP address...');
