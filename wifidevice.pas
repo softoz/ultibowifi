@@ -40,6 +40,7 @@ const
   WLC_SET_SSID = 26;
   WLC_SET_BSSID = 24;
 
+  CYW43455_SDIO_DESCRIPTION = 'Cypress CYW34355 WIFI Device';
   CYW43455_NETWORK_DESCRIPTION = 'Cypress 43455 SDIO Wireless Network Adapter';
 
   //cyw43455 event flags bits (see whd_event_msg record)
@@ -351,44 +352,12 @@ type
   
   {WIFI Device}
   PWIFIDevice = ^TWIFIDevice;
-
-  TWIFIDeviceInitialize = function(WIFI:PWIFIDevice):LongWord;{$IFDEF i386} stdcall;{$ENDIF}
-  TWIFIDeviceSetIOS = function(WIFI:PWIFIDevice):LongWord;{$IFDEF i386} stdcall;{$ENDIF}
-  TWIFIDeviceSendCommand = function(WIFI:PWIFIDevice;Command:PMMCCommand):LongWord;{$IFDEF i386} stdcall;{$ENDIF}
-
-
   TWIFIDevice = record
-   {Device Properties}
-   Device:TDevice;                                  {The Device entry for this WIFI device}
-   {WIFI Properties}
-   WIFIId:LongWord;                                  {Unique Id of this WIFI device in the MMC }
-   NetworkP : PNetworkDevice;                         // the network this device is being associated with
-   DeviceInitialize:TWIFIDeviceInitialize;           {A Device specific DeviceInitialize method implementing a standard MMC device interface (Or nil if the default method is suitable)}
-   DeviceSendCommand:TWIFIDeviceSendCommand;         {A Device specific DeviceSendCommand method implementing a standard MMC device interface (Or nil if the default method is suitable)}
-   DeviceSetIOS:TWIFIDeviceSetIOS;                   {A Device specific DeviceSetIOS method implementing a standard MMC device interface (Or nil if the default method is suitable)}
-   {Statistics Properties}
-   CommandCount:LongWord;
-   CommandErrors:LongWord;
-   {Driver Properties}
-   Lock:TMutexHandle;                               {Device lock}
-   Version:LongWord;
-   Clock:LongWord;
-   Timing:LongWord;
-   BusWidth:LongWord;
-   Voltages:LongWord;
-   Capabilities:LongWord;
-   {Register Properties}                            {See: Table 3-2: SD Memory Card Registers of SD Physical Layer Simplified Specification Version 4.10}
-   InterfaceCondition:LongWord;                     {Interface Condition Result}
-   OperationCondition:LongWord;                     {Operation Condition Register (OCR)} {See: Section 5.1 of SD Physical Layer Simplified Specification Version 4.10}
-   RelativeCardAddress:LongWord;                    {Relative Card Address (RCA) (Word)} {See: Section 5.4 of SD Physical Layer Simplified Specification Version 4.10}
-   CardSpecific:array[0..3] of LongWord;            {Card Specific Data (CSD)}           {See: Section 5.3 of SD Physical Layer Simplified Specification Version 4.10}
-   CardIdentification:array[0..3] of LongWord;      {Card Identification Data (CID)}     {See: Section 5.2 of SD Physical Layer Simplified Specification Version 4.10}
-   CardStatus:LongWord;                             {Card Status Register (CSR)}         {See: Section 4.10.1 of SD Physical Layer Simplified Specification Version 4.10}
-   DriverStage:LongWord;                            {Driver Stage Register (DSR) (Word)} {See: Section 5.5 of SD Physical Layer Simplified Specification Version 4.10}
-   SDStatus:array[0..15] of LongWord;               {SD Status Register (SSR)}           {See: Section 4.10.2 of SD Physical Layer Simplified Specification Version 4.10}
-   SDSwitch:array[0..15] of LongWord;               {SD Switch Status}                   {See: Section 4.3.10 of SD Physical Layer Simplified Specification Version 4.10}
-   SDConfiguration:array[0..1] of LongWord;         {SD Configuration Register (SCR)}    {See: Section 5.6 of SD Physical Layer Simplified Specification Version 4.10}
-
+   {MMC Properties}
+   MMC:TMMCDevice;                                  {The MMC Device entry for this WIFI device}
+   {WiFi properties}
+   NetworkP : PNetworkDevice;                       // the network this device is being associated with
+   
    // wifi chip data - some may not be needed.
 
    chipid : word;
@@ -414,12 +383,8 @@ type
    {additional statistics}
    ReceiveGlomPacketCount:LongWord;              {number of Glom packets received}
    ReceiveGlomPacketSize:LongWord;               {total bytes received via Glom packets}
-
-   {Internal Properties}
-   Prev:PWIFIDevice;                                 {Previous entry in WIFI table}
-   Next:PWIFIDevice;                                 {Next entry in WIFI table}
   end;
-
+  
   whd_event_ether_header = record
       destination_address : array[0..5] of byte;
       source_address : array[0..5] of byte;
@@ -759,14 +724,7 @@ var
 
 function WIFIHostStart(SDHCI: PSDHCIHost): LongWord;
 
-function WIFIDeviceCreate:PWIFIDevice;
-function WIFIDeviceCreateEx(Size:LongWord):PWIFIDevice;
-function WIFIDeviceDestroy(WIFI:PWIFIDevice):LongWord;
-function WIFIDeviceCheck(WIFI:PWIFIDevice):PWIFIDevice;
 function WIFIDeviceInitialize(WIFI:PWIFIDevice):LongWord;
-
-function WIFIDeviceRegister(WIFI:PWIFIDevice):LongWord;
-function WIFIDeviceFind(WIFIId:LongWord):PWIFIDevice;
 
 function SDIOWIFIDeviceReset(WIFI:PWIFIDevice):LongWord;
 function WIFIDeviceGoIdle(WIFI:PWIFIDevice):LongWord;
@@ -809,11 +767,6 @@ implementation
 
 var
   WIFIInitialized:Boolean;
-
-  WIFIDeviceTable:PWIFIDevice;
-  WIFIDeviceTableLock:TCriticalSectionHandle = INVALID_HANDLE_VALUE;
-  WIFIDeviceTableCount:LongWord;
-
 
   dodumpregisters : boolean = false;
 
@@ -971,7 +924,7 @@ begin
  {Check WIFI}
  if WIFI <> nil then
   begin
-   WorkBuffer:=WorkBuffer + WIFI_NAME_PREFIX + IntToStr(WIFI^.WIFIId) + ': ';
+   WorkBuffer:=WorkBuffer + WIFI_NAME_PREFIX + IntToStr(WIFI^.MMC.MMCId) + ': ';
   end;
 
  {Output Logging}
@@ -1009,7 +962,7 @@ var
   r : arrayptr;
   rb : arrayptrbytes;
 begin
-   SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+   SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
 
     r := arrayptr(SDHCI^.address);
     rb := arrayptrbytes(SDHCI^.address);
@@ -1242,124 +1195,6 @@ begin
   Result:=ERROR_SUCCESS;  
 end;
 
-{==============================================================================}
-
-
-function WIFIDeviceCreate:PWIFIDevice;
-{Create a new WIFI entry}
-{Return: Pointer to new WIFI entry or nil if WIFI could not be created}
-begin
- {}
- Result:=WIFIDeviceCreateEx(SizeOf(TWIFIDevice));
-end;
-
-{==============================================================================}
-
-function WIFIDeviceCreateEx(Size:LongWord):PWIFIDevice;
-{Create a new WIFI entry}
-{Size: Size in bytes to allocate for new WIFI (Including the WIFI entry)}
-{Return: Pointer to new WIFI entry or nil if WIFI could not be created}
-begin
- {}
- Result:=nil;
-
- {Check Size}
- if Size < SizeOf(TWIFIDevice) then Exit;
-
- {Create WIFI}
- Result:=PWIFIDevice(DeviceCreateEx(Size));
- if Result = nil then Exit;
-
- {Update Device}
- Result^.Device.DeviceBus:=DEVICE_BUS_NONE;
- Result^.Device.DeviceType:=MMC_TYPE_NONE;
- Result^.Device.DeviceFlags:=MMC_FLAG_NONE;
- Result^.Device.DeviceData:=nil;
-
- {Update WIFI}
- Result^.WIFIId:=DEVICE_ID_ANY;
- Result^.DeviceInitialize:=nil;
- Result^.DeviceSendCommand:=nil;
- Result^.DeviceSetIOS:=nil;
- Result^.Lock:=INVALID_HANDLE_VALUE;
-
- {Create Lock}
- Result^.Lock:=MutexCreateEx(False,MUTEX_DEFAULT_SPINCOUNT,MUTEX_FLAG_RECURSIVE);
- if Result^.Lock = INVALID_HANDLE_VALUE then
-  begin
-   if WIFI_LOG_ENABLED then WIFILogError(nil,'Failed to create lock for WIFI device');
-   WIFIDeviceDestroy(Result);
-   Result:=nil;
-   Exit;
-  end;
-
-  WIFIDeviceRegister(Result);
-end;
-
-function WIFIDeviceDestroy(WIFI:PWIFIDevice):LongWord;
-{Destroy an existing WIFI entry}
-begin
- {}
- Result:=ERROR_INVALID_PARAMETER;
-
- {Check WIFI}
- if WIFI = nil then Exit;
- if WIFI^.Device.Signature <> DEVICE_SIGNATURE then Exit;
-
- {Check WIFI}
- Result:=ERROR_IN_USE;
- if WIFIDeviceCheck(WIFI) = WIFI then Exit;
-
- {Check State}
- if WIFI^.Device.DeviceState <> DEVICE_STATE_UNREGISTERED then Exit;
-
- {Destroy Lock}
- if WIFI^.Lock <> INVALID_HANDLE_VALUE then
-  begin
-   MutexDestroy(WIFI^.Lock);
-  end;
-
- {Destroy WIFI}
- Result:=DeviceDestroy(@WIFI^.Device);
-end;
-
-function WIFIDeviceCheck(WIFI:PWIFIDevice):PWIFIDevice;
-{Check if the supplied WIFI device is in the table}
-var
- Current:PWIFIDevice;
-begin
- {}
- Result:=nil;
-
- {Check WIFI}
- if WIFI = nil then Exit;
- if WIFI^.Device.Signature <> DEVICE_SIGNATURE then Exit;
-
- {Acquire the Lock}
- if CriticalSectionLock(WIFIDeviceTableLock) = ERROR_SUCCESS then
-  begin
-   try
-    {Get WIFI}
-    Current:= WIFIDeviceTable;
-    while Current <> nil do
-     begin
-      {Check WIFI}
-      if Current = WIFI then
-       begin
-        Result:=WIFI;
-        Exit;
-       end;
-
-      {Get Next}
-      Current:=Current^.Next;
-     end;
-   finally
-    {Release the Lock}
-    CriticalSectionUnlock(WIFIDeviceTableLock);
-   end;
-  end;
-end;
-
 function SDHCIEnum(SDHCI:PSDHCIHost;Data:Pointer):LongWord;
 
 const
@@ -1397,13 +1232,21 @@ var
 begin
  Result := ERROR_INVALID_PARAMETER;
  
- WIFI:=WIFIDeviceCreate;
+ WIFI:=PWIFIDevice(MMCDeviceCreateEx(SizeOf(TWIFIDevice)));
  if WIFI = nil then
   begin
    WIFILogError(nil,'Failed to create new WIFI device');
    Exit;
   end;
 
+ if MMCDeviceRegister(@WIFI^.MMC) <> MMC_STATUS_SUCCESS then
+  begin
+   WIFILogError(nil,'Failed to register new WIFI device');
+     
+   MMCDeviceDestroy(@WIFI^.MMC);
+   Exit;
+  end;
+ 
  if WIFI_LOG_ENABLED then WIFILogInfo(nil,'Update WIFI Device');
 
  if PCYW43455Network(Network)^.SDHCI = nil then
@@ -1415,15 +1258,15 @@ begin
  WIFI^.ReceiveGlomPacketCount:=0;
  WIFI^.ReceiveGlomPacketSize:=0;
 
- WIFI^.Device.DeviceBus:=DEVICE_BUS_SD;
- WIFI^.Device.DeviceType:=MMC_TYPE_SDIO;
- WIFI^.Device.DeviceFlags:=MMC_FLAG_NONE;
- WIFI^.Device.DeviceData:=PCYW43455Network(Network)^.SDHCI;
- WIFI^.Device.DeviceDescription:='Cypress CYW34355 WIFI Device';
+ WIFI^.MMC.Device.DeviceBus:=DEVICE_BUS_SD;
+ WIFI^.MMC.Device.DeviceType:=MMC_TYPE_SDIO;
+ WIFI^.MMC.Device.DeviceFlags:=MMC_FLAG_NONE;
+ WIFI^.MMC.Device.DeviceData:=PCYW43455Network(Network)^.SDHCI;
+ WIFI^.MMC.Device.DeviceDescription:=CYW43455_SDIO_DESCRIPTION;
  
  WIFI^.SDIOProtect := SpinCreate;
  
- WIFI^.DeviceInitialize:=nil;
+ WIFI^.MMC.DeviceInitialize:=nil;
 
  Network^.Device.DeviceData := WIFI;
 
@@ -1434,7 +1277,8 @@ begin
  if (Status <> MMC_STATUS_SUCCESS)then
   begin
    WIFILogError(nil,'WIFI Failed to initialize new WIFI device ' + inttostr(status));
-   WIFIDeviceDestroy(WIFI);
+   MMCDeviceDestroy(@WIFI^.MMC);
+   Exit;
   end;
 
  // set buffering sizes
@@ -2041,16 +1885,6 @@ begin
    exit;
  end;
 
-
- {Initialize WIFI Device Table}
- WIFIDeviceTable:=nil;
- WIFIDeviceTableLock:=CriticalSectionCreate;
- WIFIDeviceTableCount:=0;
- if WIFIDeviceTableLock = INVALID_HANDLE_VALUE then
-  begin
-   if WIFI_LOG_ENABLED then WIFILogError(nil,'Failed to create WIFI device table lock');
-  end;
-
  {$ifdef CYW43455_DEBUG}
  if WIFI_LOG_ENABLED then WIFILogDebug(nil, 'WIFIInit Complete');
  {$endif}
@@ -2071,7 +1905,7 @@ begin
  if WIFI_LOG_ENABLED then WIFILogInfo(nil,'WIFI Set Clock (Clock=' + IntToStr(Clock) + ')');
 
  {Get SDHCI}
- SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+ SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
  if SDHCI = nil then Exit;
 
  {$ifdef CYW43455_DEBUG}
@@ -2088,7 +1922,7 @@ begin
   end;
 
  {Set Clock}
- WIFI^.Clock:=Clock;
+ WIFI^.MMC.Clock:=Clock;
 
  {Set IOS}
  Result:=WIFIDeviceSetIOS(WIFI);
@@ -2123,12 +1957,12 @@ begin
  if WIFI = nil then Exit;
 
  {Check Initialize}
- if Assigned(WIFI^.DeviceInitialize) then
+ if Assigned(WIFI^.MMC.DeviceInitialize) then
   begin
    {$ifdef CYW43455_DEBUG}
    if WIFI_LOG_ENABLED then WIFILogDebug(nil,'WIFI^.DeviceInitialize');
    {$endif}
-   Result:=WIFI^.DeviceInitialize(WIFI);
+   Result:=WIFI^.MMC.DeviceInitialize(@WIFI^.MMC);
   end
  else
   begin
@@ -2138,7 +1972,7 @@ begin
    if WIFI_LOG_ENABLED then WIFILogDebug(nil,'Default initialize method');
    {$endif}
 
-   SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+   SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
    if SDHCI = nil then
    begin
     WIFILogError(nil, 'The SDHCI host is nil');
@@ -2194,10 +2028,10 @@ begin
     else
       WIFILogError(nil, 'send operation condition failed');
 
-   WIFI^.Device.DeviceBus:=DEVICE_BUS_SD;
-   WIFI^.Device.DeviceType:=MMC_TYPE_SDIO;
-   WIFI^.RelativeCardAddress:=0;
-   WIFI^.OperationCondition := $200000;
+   WIFI^.MMC.Device.DeviceBus:=DEVICE_BUS_SD;
+   WIFI^.MMC.Device.DeviceType:=MMC_TYPE_SDIO;
+   WIFI^.MMC.RelativeCardAddress:=0;
+   WIFI^.MMC.OperationCondition := $200000;
 
    {$ifdef CYW43455_DEBUG}
    if WIFI_LOG_ENABLED then WIFILogDebug(nil,'MMC Initialize Card Type is SDIO');
@@ -2224,7 +2058,7 @@ begin
 
    Result := WIFIDeviceSendCommand(WIFI, @Command);
    rcaraw := command.response[0];
-   WIFI^.RelativeCardAddress := (rcaraw shr 16) and $ff;
+   WIFI^.MMC.RelativeCardAddress := (rcaraw shr 16) and $ff;
    if (Result = MMC_STATUS_SUCCESS) then
    begin
       if WIFI_LOG_ENABLED then
@@ -2538,117 +2372,6 @@ begin
    WIFILogError(nil, 'something went wrong in setbackplanewindow');
 end;
 
-function WIFIDeviceRegister(WIFI:PWIFIDevice):LongWord;
-{Register a new WIFI device in the table}
-var
- WIFIId:LongWord;
-begin
- {}
- Result:=ERROR_INVALID_PARAMETER;
-
- {Check WIFI}
- if WIFI = nil then Exit;
- if WIFI^.WIFIId <> DEVICE_ID_ANY then Exit;
- if WIFI^.Device.Signature <> DEVICE_SIGNATURE then Exit;
-
- {Check WIFI}
- Result:=ERROR_ALREADY_EXISTS;
- if WIFIDeviceCheck(WIFI) = WIFI then Exit;
-
- {Check State}
- if WIFI^.Device.DeviceState <> DEVICE_STATE_UNREGISTERED then Exit;
-
- {Insert WIFI}
- if CriticalSectionLock(WIFIDeviceTableLock) = ERROR_SUCCESS then
-  begin
-   try
-    {Update WIFI}
-    WIFIId:=0;
-    while WIFIDeviceFind(WIFIId) <> nil do
-     begin
-      Inc(WIFIId);
-     end;
-    WIFI^.WIFIId:=WIFIId;
-
-    {Update Device}
-    WIFI^.Device.DeviceName:=WIFI_NAME_PREFIX + IntToStr(WIFI^.WIFIId);
-    WIFI^.Device.DeviceClass:=DEVICE_CLASS_SD;
-
-    {Register Device}
-    Result:=DeviceRegister(@WIFI^.Device);
-    WIFILogError(nil, 'deviceregister result = ' + inttostr(result));
-    if Result <> ERROR_SUCCESS then
-     begin
-      WIFI^.WIFIId:=DEVICE_ID_ANY;
-      Exit;
-     end;
-
-    {Link WIFI}
-    if WIFIDeviceTable = nil then
-     begin
-      WIFIDeviceTable:=WIFI;
-     end
-    else
-     begin
-      WIFI^.Next:=WIFIDeviceTable;
-      WIFIDeviceTable^.Prev:=WIFI;
-      WIFIDeviceTable:=WIFI;
-     end;
-
-    {Increment Count}
-    Inc(WIFIDeviceTableCount);
-
-    {Return Result}
-    Result:=ERROR_SUCCESS;
-   finally
-    CriticalSectionUnlock(WIFIDeviceTableLock);
-   end;
-  end
- else
-  begin
-   Result:=ERROR_CAN_NOT_COMPLETE;
-  end;
-end;
-
-function WIFIDeviceFind(WIFIId:LongWord):PWIFIDevice;
-var
- WIFI:PWIFIDevice;
-begin
- {}
- Result:=nil;
-
- {Check Id}
- if WIFIId = DEVICE_ID_ANY then Exit;
-
- {Acquire the Lock}
- if CriticalSectionLock(WIFIDeviceTableLock) = ERROR_SUCCESS then
-  begin
-   try
-    {Get WIFI}
-    WIFI:=WIFIDeviceTable;
-    while WIFI <> nil do
-     begin
-      {Check State}
-      if WIFI^.Device.DeviceState = DEVICE_STATE_REGISTERED then
-       begin
-        {Check Id}
-        if WIFI^.WIFIId = WIFIId then
-         begin
-          Result:=WIFI;
-          Exit;
-         end;
-       end;
-
-       {Get Next}
-      WIFI:=WIFI^.Next;
-     end;
-   finally
-    {Release the Lock}
-    CriticalSectionUnlock(WIFIDeviceTableLock);
-   end;
-  end;
-end;
-
 function SDIOWIFIDeviceReset(WIFI:PWIFIDevice):LongWord;
 {See: SDIO Simplified Specification V2.0, 4.4 Reset for SDIO}
 var
@@ -2778,7 +2501,7 @@ begin
  {$endif}
 
  {Get SDHCI}
- SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+ SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
  if SDHCI = nil then Exit;
 
  {Setup Command}
@@ -2820,7 +2543,7 @@ begin
      + 'Response1=' + IntToHex(Command.Response[1] and $FF,8));
    {$endif}
 
-   WIFI^.InterfaceCondition:=Command.Response[0];
+   WIFI^.MMC.InterfaceCondition:=Command.Response[0];
 
  Result:=MMC_STATUS_SUCCESS;
 
@@ -2847,7 +2570,7 @@ begin
  {$ENDIF}
 
  {Get SDHCI}
- SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+ SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
  if SDHCI = nil then Exit;
 
  {Setup Command}
@@ -2855,7 +2578,7 @@ begin
  Command.Command:=SDIO_CMD_SEND_OP_COND;
  Command.Argument:=0;
  if not(Probe) then
-   Command.Argument:=WIFI^.OperationCondition;
+   Command.Argument:=WIFI^.MMC.OperationCondition;
 
  Command.ResponseType:=MMC_RSP_R4;
  Command.Data:=nil;
@@ -2901,7 +2624,7 @@ begin
   if WIFI_LOG_ENABLED then WIFILogDebug(nil, 'operation condition returned as ' + inttostr(command.response[0]));
  {$endif}
 
-  WIFI^.OperationCondition:=Command.Response[0];
+  WIFI^.MMC.OperationCondition:=Command.Response[0];
   //To Do //SD_OCR_CCS etc (see: MMC/SD)
 
   Result:=MMC_STATUS_SUCCESS;
@@ -2925,34 +2648,34 @@ begin
  {$endif}
 
  {Check Set IOS}
- if Assigned(WIFI^.DeviceSetIOS) then
+ if Assigned(WIFI^.MMC.DeviceSetIOS) then
   begin
-   Result:=WIFI^.DeviceSetIOS(WIFI);
+   Result:=WIFI^.MMC.DeviceSetIOS(@WIFI^.MMC);
   end
  else
   begin
    {Default Method}
    {Get SDHCI}
-   SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+   SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
    if SDHCI = nil then Exit;
 
    {Set Control Register}
    SDHCIHostSetControlRegister(SDHCI);
 
    {Check Clock}
-   if WIFI^.Clock <> SDHCI^.Clock then
+   if WIFI^.MMC.Clock <> SDHCI^.Clock then
     begin
-     SDHCIHostSetClock(SDHCI,WIFI^.Clock);
-     SDHCI^.Clock:=WIFI^.Clock;
+     SDHCIHostSetClock(SDHCI,WIFI^.MMC.Clock);
+     SDHCI^.Clock:=WIFI^.MMC.Clock;
     end;
 
    {Set Power}
    SDHCIHostSetPower(SDHCI,FirstBitSet(SDHCI^.Voltages));
 
    {Set Bus Width}
-   WIFI^.BusWidth := MMC_BUS_WIDTH_4;
+   WIFI^.MMC.BusWidth := MMC_BUS_WIDTH_4;
    Value:=SDHCIHostReadByte(SDHCI,SDHCI_HOST_CONTROL);
-(*   if WIFI^.BusWidth = MMC_BUS_WIDTH_8 then
+(*   if WIFI^.MMC.BusWidth = MMC_BUS_WIDTH_8 then
     begin
      Value:=Value and not(SDHCI_CTRL_4BITBUS);
      if (SDHCIGetVersion(SDHCI) >= SDHCI_SPEC_300) or ((SDHCI^.Quirks2 and SDHCI_QUIRK2_USE_WIDE8) <> 0) then
@@ -2971,7 +2694,7 @@ begin
        Value:=Value and not(SDHCI_CTRL_8BITBUS);
       end;
 
-     if WIFI^.BusWidth = MMC_BUS_WIDTH_4 then
+     if WIFI^.MMC.BusWidth = MMC_BUS_WIDTH_4 then
       begin
        {$ifdef CYW43455_DEBUG}
        if WIFI_LOG_ENABLED then WIFILogDebug(nil, 'set 4 bit bus');
@@ -2994,10 +2717,10 @@ begin
    SDHCIHostWriteByte(SDHCI, SDHCI_POWER_CONTROL, 0);
 
    {Update Bus Width}  
-   SDHCI^.BusWidth:=WIFI^.BusWidth;
+   SDHCI^.BusWidth:=WIFI^.MMC.BusWidth;
 
    {Check Clock}
-   if WIFI^.Clock > 26000000 then
+   if WIFI^.MMC.Clock > 26000000 then
     begin
      Value:=Value or SDHCI_CTRL_HISPD;
     end
@@ -3014,7 +2737,7 @@ begin
    SDHCIHostWriteByte(SDHCI,SDHCI_HOST_CONTROL,Value);
 
    {Update Timing}  
-   SDHCI^.Timing:=WIFI^.Timing;
+   SDHCI^.Timing:=WIFI^.MMC.Timing;
 
    Result:=MMC_STATUS_SUCCESS;
   end;
@@ -3046,7 +2769,7 @@ begin
    {$endif}
 
    {Get SDHCI}
-   SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+   SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
    if SDHCI = nil then Exit;
 
    {Check Operation}
@@ -3140,7 +2863,7 @@ begin
    {$endif}
 
    {Get SDHCI}
-   SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+   SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
    if SDHCI = nil then Exit;
 
    {Check Operation}
@@ -3275,9 +2998,9 @@ begin
  {$endif}
 
  {Check Send Command}
- if Assigned(WIFI^.DeviceSendCommand) then
+ if Assigned(WIFI^.MMC.DeviceSendCommand) then
   begin
-   Result:=WIFI^.DeviceSendCommand(WIFI,Command);
+   Result:=WIFI^.MMC.DeviceSendCommand(@WIFI^.MMC,Command);
   end
  else
   begin
@@ -3286,11 +3009,11 @@ begin
    if Command = nil then Exit;
 
    {Get SDHCI}
-   SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+   SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
    if SDHCI = nil then Exit;
 
    {Acquire the Lock}
-   if MutexLock(WIFI^.Lock) = ERROR_SUCCESS then
+   if MutexLock(WIFI^.MMC.Lock) = ERROR_SUCCESS then
     begin
      try
       {Setup Status}
@@ -3613,7 +3336,7 @@ begin
 
      finally
       {Release the Lock}
-      MutexUnlock(WIFI^.Lock);
+      MutexUnlock(WIFI^.MMC.Lock);
      end;
     end;
 
@@ -3648,13 +3371,13 @@ begin
  {$ENDIF}
 
  {Get SDHCI}
- SDHCI:=PSDHCIHost(WIFI^.Device.DeviceData);
+ SDHCI:=PSDHCIHost(WIFI^.MMC.Device.DeviceData);
  if SDHCI = nil then Exit;
 
  {Setup Application Command}
  FillChar(ApplicationCommand,SizeOf(TMMCCommand),0);
  ApplicationCommand.Command:=MMC_CMD_APP_CMD;
- ApplicationCommand.Argument:=(WIFI^.RelativeCardAddress shl 16);
+ ApplicationCommand.Argument:=(WIFI^.MMC.RelativeCardAddress shl 16);
  ApplicationCommand.ResponseType:= MMC_RSP_R1;
  ApplicationCommand.Data:=nil;
 

@@ -601,7 +601,7 @@ begin
       Sleep(0);
     end;
 
-    WIFIDeviceP := WIFIDeviceFind(0);
+    WIFIDeviceP := PWIFIDevice(MMCDeviceFindByDescription(CYW43455_SDIO_DESCRIPTION));
 
     if (SysUtils.GetEnvironmentVariable('WIFISCAN') = '1') then
     begin
