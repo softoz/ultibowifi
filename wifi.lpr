@@ -46,8 +46,13 @@ uses
   HTTP,
   WebStatus,
   Serial,
+{$ifdef supplicant}
+  syscalls,
+{$endif}
   ip,
-  transport;
+  transport,
+  Iphlpapi
+  ;
 
 //{$DEFINE SERIAL_LOGGING}
 
@@ -325,6 +330,9 @@ var
   Status : Longword;
   CYW43455Network: PCYW43455Network;
   BSSIDStr : string;
+  StdoutToLogging : boolean = false;
+  LoggingLine : string = '';
+
 
 procedure WIFIScanCallback(ssid : string; ScanResultP : pwl_escan_result);
 var
@@ -341,61 +349,138 @@ begin
     ScanResultList.Add(ssidstr);
 end;
 
-procedure WaitForIP;
-{$ifndef oldipdetect}
+
+function GetMACAddress(const AdapterName: String): String;
+// Get the MAC address of an adapter using the IP Helper API
 var
-  WiredAdapter : twiredadapter;
-  IPTransport : TIPTransport;
-  IPTransportAdapter : TIPTransportAdapter;
-{$endif}
+  Size:LongWord;
+  Count: LongWord;
+  Name: String;
+  IfTable: PMIB_IFTABLE;
+  IfRow: PMIB_IFROW;
+  HardwareAddress: THardwareAddress;
 begin
-  {$ifndef oldipdetect}
-  // locate network WiredAdapter
+  Result := '';
+
+  // Get number of network interfaces
+  GetNumberOfInterfaces(Count);
+
+  if Count > 0 then
+  begin
+    Size := SizeOf(MIB_IFTABLE) + (Count * SizeOf(MIB_IFROW));
+    IfTable := GetMem(Size);
+    if IfTable <> nil then
+    begin
+      // Get the network interface table
+      if GetIfTable(IfTable, Size, False) = ERROR_SUCCESS then
+      begin
+        // Get first row
+        IfRow := @IfTable^.table[0];
+
+        Count := 0;
+        while Count < IfTable^.dwNumEntries do
+        begin
+          Name := IfRow^.wszName;
+
+          // Check name
+          if Uppercase(Name) = Uppercase(AdapterName) then
+          begin
+            // Check address size
+            if IfRow^.dwPhysAddrLen = SizeOf(THardwareAddress) then
+            begin
+              System.Move(IfRow^.bPhysAddr[0], HardwareAddress[0], HARDWARE_ADDRESS_SIZE);
+              Result := HardwareAddressToString(HardwareAddress);
+              Exit;
+            end;
+          end;
+
+          // Get next row
+          Inc(Count);
+          Inc(IfRow);
+        end;
+      end;
+
+      FreeMem(IfTable);
+    end;
+  end;
+end;
+
+function GetIPAddress(const AdapterName: String): String;
+// Get the IP address of an adapter using the IP Helper API
+var
+  Size: LongWord;
+  Count: Integer;
+  Address: String;
+  MACAddress: String;
+  IpNetTable: PMIB_IPNETTABLE;
+  IpNetRow: PMIB_IPNETROW;
+  IPAddress: TInAddr;
+  HardwareAddress: THardwareAddress;
+begin
+  Result := '';
+
+  // Get the MAC address
+  MACAddress := GetMacAddress(AdapterName);
+  if Length(MACAddress) = 0 then
+    Exit;
+
+  // Get the ip net table (ARP table)
+  // First get the size
+  Size := 0;
+  IpNetTable := nil;
+  if (GetIpNetTable(nil, Size, False) = ERROR_INSUFFICIENT_BUFFER) and (Size > 0) then // First call with zero size
+  begin
+    IpNetTable := GetMem(Size);
+  end;
+  if IpNetTable <> nil then
+  begin
+    // Now get the table
+    if GetIpNetTable(IpNetTable, Size, False) = ERROR_SUCCESS then
+    begin
+      // Get first row
+      IpNetRow := @IpNetTable^.table[0];
+
+      Count := 0;
+      while Count < IpNetTable^.dwNumEntries do
+      begin
+        // Check address size
+        if IpNetRow^.dwPhysAddrLen = SizeOf(THardwareAddress) then
+        begin
+          // Get the address
+          System.Move(IpNetRow^.bPhysAddr[0], HardwareAddress[0], HARDWARE_ADDRESS_SIZE);
+          Address := HardwareAddressToString(HardwareAddress);
+
+          // Check the address
+          if Uppercase(Address) = Uppercase(MACAddress) then
+          begin
+            IPAddress.S_addr := IpNetRow^.dwAddr;
+            Result := InAddrToString(IPAddress);
+          end;
+        end;
+
+        // Get next row
+        Inc(Count);
+        Inc(IpNetRow);
+      end;
+    end;
+
+    FreeMem(IpNetTable);
+  end;
+end;
+
+procedure WaitForIP;
+var
+  WiredAdapter : TWiredAdapter;
+begin
+  // locate network WiredAdapter (the wireless interface is still supported by a wiredadapter object at present)
   WiredAdapter := TWiredAdapter(AdapterManager.GetAdapterByDevice(PNetworkDevice(CYW43455Network), false, 0));
 
-  // locate IP transport
-  IPTransport := TIPTransport(TransportManager.GetTransportByName(IP_TRANSPORT_NAME, false, 0));
-
-  // locate IP transport WiredAdapter
-  IPTransportAdapter := TIPTransportAdapter(IPTransport.GetAdapterByNext(nil,False,False,NETWORK_LOCK_READ));
-  while IPTransportAdapter <> nil do
-  begin
-    if IPTransportAdapter.Adapter = tnetworkadapter(WiredAdapter) then
-      break;
-
-    IPTransportAdapter := TIPTransportAdapter(IPTransport.GetAdapterByNext(IPTransportAdapter,False,False,NETWORK_LOCK_READ));
-  end;
-
-  // wait for IP address to update
-  IPAddress := '0.0.0.0';
-  while IPAddress = '0.0.0.0' do
+  IPAddress := GetIPAddress(WiredAdapter.Name);
+  while (IPAddress = '') or (IPAddress = '0.0.0.0') do
   begin
     sleep(200);
-    try
-      IPAddress := InAddrToString(InAddrToNetwork(IPTransportAdapter.Address));
-    except
-      // The InAddrToNetwork call here^^^ sometimes crashes. Maybe the RTL
-      // is changing the objects after we've looked them up.
-      IPAddress := '0.0.0.0';
-    end;
+    IPAddress := GetIPAddress(WiredAdapter.Name);
   end;
- {$else}
-
-  Winsock2TCPClient:=TWinsock2TCPClient.Create;
-
-  while (true) do
-  begin
-    sleep(200);
-    if (Winsock2TCPClient.LocalAddress <> IPAddress)
-       and (length(Winsock2TCPClient.LocalAddress) > 0)
-       and (Winsock2TCPClient.LocalAddress <> ' ') then
-    begin
-      IPAddress := Winsock2TCPClient.LocalAddress;
-      break;
-    end;
-  end;
-
-{$endif}
 
   ConsoleWindowWriteln(TopWindow, 'IP Address=' + IPAddress);
 end;
@@ -430,6 +515,32 @@ begin
   ConsoleWindowWriteEx(window, 'CPU' + inttostr(core) + ' '  + floattostr(cpupercent) + '%      ', 1, 3+core, COLOR_BLACK, COLOR_WHITE);
 end;
 
+
+function MySysTextIOWriteChar(ACh:Char;AUserData:Pointer):Boolean;
+begin
+  // this lets us get the supplicant output, which is written to stdout, into
+  // the standard logging system and thus into a file or serial if enabled.
+
+  // we don't write the logging to the console and the logging device because
+  // doing both slows everything down too much and the router's responses are
+  // missed and we fail to get logged in.
+  if (StdOutToLogging) then
+   begin
+    if ach = #10 then
+    begin
+     loggingoutputex(0, 0, 'stdio', loggingline);
+     loggingline := '';
+    end
+    else
+    if ach <> #13 then
+     loggingline := loggingline + ach;
+     Result := true;
+   end
+   else
+     Result := Console.SysTextIOWriteChar(ACh, auserdata);
+end;
+
+
 var
   BSSID : ether_addr;
   LedStatus : boolean;
@@ -449,9 +560,28 @@ begin
   SerialLoggingDeviceAdd(SerialDeviceGetDefault);
   LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_SERIAL));
   {$ELSE}
-  LoggingConsoleDeviceAdd(ConsoleDeviceGetDefault);
-  LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_CONSOLE));
+  StdoutToLogging := true;
+  if (SysUtils.GetEnvironmentVariable('FILESYS_LOGGING_FILE') <> '') then
+  begin
+    StdOutToLogging := true;
+    LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_FILE));
+  end
+  else
+  begin
+    CONSOLE_LOGGING_POSITION := CONSOLE_POSITION_RIGHT;
+    LoggingConsoleDeviceAdd(ConsoleDeviceGetDefault);
+    LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_CONSOLE));
+  end;
   {$ENDIF}
+
+  {$ifdef supplicant}
+  // intercept stdio for logging purposes.
+  // supplicant writes to stdio for info and debug etc.
+  ConsoleWindowRedirectOutput(TopWindow);
+
+  TextIOWriteCharHandler:=@MySysTextIOWriteChar;
+  {$endif}
+
 
   // Filter the logs so we only see the WiFi and MMC device events
   // (Primarily development use, otherwise you don't see network events etc)
@@ -521,6 +651,7 @@ begin
 
     WIFIDeviceP := WIFIDeviceFind(0);
 
+    {$ifndef supplicant}
     if (SysUtils.GetEnvironmentVariable('WIFISCAN') = '1') then
     begin
       ConsoleWindowWriteln(TopWindow, 'Performing a WIFI network scan...');
@@ -535,21 +666,27 @@ begin
     end
     else
       ConsoleWindowWriteln(TopWindow, 'Network scan not enabled in cmdline.txt (add the WIFISCAN=1 entry)');
+    {$endif}
 
     SSID := SysUtils.GetEnvironmentVariable('SSID');
     key := SysUtils.GetEnvironmentVariable('KEY');
     Country := SysUtils.GetEnvironmentVariable('COUNTRY');
     BSSIDStr := SysUtils.GetEnvironmentVariable('BSSID');
 
+    {$ifdef supplicant}
+    ConsoleWindowWriteln(TopWindow, 'Attempting to join WIFI network using configuration in c:\wpa_supplicant.conf');
+    {$else}
     ConsoleWindowWriteln(topwindow, 'Attempting to join WIFI network ' + SSID + ' (Country='+Country+')');
 
     if (Key = '') then
       ConsoleWindowWriteln(TopWindow, 'Warning: Key not specified - expecting the network to be unencrypted.');
+    {$endif}
 
     if (SSID = '') or (Country='') then
        ConsoleWindowWriteln(TopWindow, 'Cant join a network without SSID, Key, and Country Code.')
     else
     begin
+      {$ifndef supplicant}
       if (BSSIDStr <> '') then
       begin
         ConsoleWindowWriteln(TopWindow, 'Using BSSID configuration ' + BSSIDStr + ' from cmdline.txt');
@@ -563,8 +700,9 @@ begin
       else
         ConsoleWindowWriteln(TopWindow, 'Letting the Cypress firmware determine the best network interface from the SSID');
 
-      status := WirelessJoinNetwork(SSID, Key, Country, WIFIJoinBlocking, WIFIReconnectAlways, BSSID, (BSSIDStr <> ''));
       IPAddress := '0.0.0.0';
+      status := WirelessJoinNetwork(SSID, Key, Country, WIFIJoinBlocking, WIFIReconnectAlways, BSSID, (BSSIDStr <> ''));
+
       if (status = WIFI_STATUS_SUCCESS) then
       begin
 
@@ -583,6 +721,13 @@ begin
 
         DumpIP;
       end;
+      {$else}
+      WirelessJoinNetWork(WIFIJoinBlocking);
+      ConsoleWindowWriteln(TopWindow, 'Waiting for an IP address...');
+
+      WaitForIP;
+      DumpIP;
+      {$endif}
 
       ConsoleWindowWriteln(CPUWindow, 'CPU Utilisation');
 
@@ -616,7 +761,6 @@ begin
 
         Sleep(500);
       end;
-
     end;
 
   except
