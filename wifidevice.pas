@@ -4194,19 +4194,21 @@ begin
           SupplicantOperatingState:=0;
           {$endif}
 
-          {Set Status to Down}
-          FWIFI^.NetworkP^.NetworkStatus := NETWORK_STATUS_DOWN;
+          if FWIFI^.NetworkP^.NetworkStatus <> NETWORK_STATUS_DOWN then
+          begin
+            {Set Status to Down}
+            FWIFI^.NetworkP^.NetworkStatus := NETWORK_STATUS_DOWN;
 
-          {Notify the Status}
-          NotifierNotify(@FWIFI^.NetworkP^.Device, DEVICE_NOTIFICATION_DOWN);
+            {Notify the Status}
+            NotifierNotify(@FWIFI^.NetworkP^.Device, DEVICE_NOTIFICATION_DOWN);
 
-          {$ifndef supplicant}
-          SemaphoreSignal(BackgroundJoinThread.FConnectionLost);
-          {$else}
-          {I know this is the same but I might need to change it. Delete eventually if unchanged.}
-          SemaphoreSignal(BackgroundJoinThread.FConnectionLost);
-          {$endif}
-
+            {$ifndef supplicant}
+            SemaphoreSignal(BackgroundJoinThread.FConnectionLost);
+            {$else}
+            {I know this is the same but I might need to change it. Delete eventually if unchanged.}
+            SemaphoreSignal(BackgroundJoinThread.FConnectionLost);
+            {$endif}
+          end;  
         end;
 
         // see if there are any requests interested in this event, and if so trigger
