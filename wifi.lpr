@@ -23,6 +23,7 @@ uses
   Classes,
   ShellFilesystem,
   ShellUpdate,
+  ShellUSB,
   RemoteShell,
   logoutput,
   console,
