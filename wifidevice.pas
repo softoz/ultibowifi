@@ -711,7 +711,7 @@ const
   WIFI_LOG_LEVEL_NONE      = LOG_LEVEL_NONE;   {No WIFI messages}
 
 var
-  WIFI_DEFAULT_LOG_LEVEL:LongWord = WIFI_LOG_LEVEL_INFO; {Minimum level for WIFI messages.  Only messages with level greater than or equal to this will be printed}
+  WIFI_DEFAULT_LOG_LEVEL:LongWord = WIFI_LOG_LEVEL_DEBUG; {Minimum level for WIFI messages.  Only messages with level greater than or equal to this will be printed}
 
 var
   WIFI_LOG_ENABLED : boolean = true;
@@ -745,8 +745,6 @@ implementation
 
 var
   WIFIInitialized:Boolean;
-
-  dodumpregisters:boolean;
 
   firmware : array[1..FIRWMARE_OPTIONS_COUNT] of TFirmwareEntry =
     (
@@ -979,6 +977,7 @@ end;
 {==============================================================================}
 
 function WIFIHostStart(SDHCI: PSDHCIHost): LongWord;
+//Not required
 // Overwridden SDHCIHostStart method for the Arasan SDHCI controller
 var
   {$IFNDEF RPI4}
@@ -1310,6 +1309,12 @@ begin
  WIFI^.ReceiveGlomPacketCount:=0;
  WIFI^.ReceiveGlomPacketSize:=0;
  
+ if not(DMA_CACHE_COHERENT) then
+  begin
+   {Clean Cache (Dest)}
+   CleanDataCacheRange(PtrUInt(WIFI^.DMABuffer), IOCTL_MAX_BLKLEN);
+  end;
+ 
  Network^.Device.DeviceData := WIFI;
 
  if WIFI_LOG_ENABLED then WIFILogInfo(nil,'WIFIDeviceInitialize');
@@ -1378,6 +1383,12 @@ begin
      Exit;
     end;
 
+   if not(DMA_CACHE_COHERENT) then
+    begin
+     {Clean Cache (Dest)}
+     CleanDataCacheRange(PtrUInt(Entry^.Buffer), Entry^.Size);
+    end;
+
    {Initialize Packets}
    SetLength(Entry^.Packets,PCYW43455Network(Network)^.ReceivePacketCount);
 
@@ -1426,6 +1437,12 @@ begin
      if WIFI_LOG_ENABLED then WIFILogError(nil,'CY43455: Failed to allocate wifi transmit buffer');
 
      Exit;
+    end;
+
+   if not(DMA_CACHE_COHERENT) then
+    begin
+     {Clean Cache (Dest)}
+     CleanDataCacheRange(PtrUInt(Entry^.Buffer), Entry^.Size);
     end;
 
    {Initialize Packets}
@@ -1953,9 +1970,9 @@ var
  chipid : word;
  chipidrev : byte;
  bytevalue : byte;
- blocksize : byte;
- result1, result2 : longword;
- retries : word;
+ //blocksize : byte;
+ //result1, result2 : longword;
+ //retries : word;
 begin
  {}
  try
@@ -2049,7 +2066,6 @@ begin
    WIFI^.MMC.Device.DeviceBus:=DEVICE_BUS_SD;
    WIFI^.MMC.Device.DeviceType:=MMC_TYPE_SDIO;
    WIFI^.MMC.RelativeCardAddress:=0;
-   WIFI^.MMC.OperationCondition := $200000;
 
    {$ifdef CYW43455_DEBUG}
    if WIFI_LOG_ENABLED then WIFILogDebug(nil,'MMC Initialize Card Type is SDIO');
@@ -2133,19 +2149,19 @@ begin
    //else
    //  WIFILogError(nil, 'Failed to update bus interface control');
 
-   if WIFI_LOG_ENABLED then WIFILogInfo(nil,'Waiting until the backplane is ready');
-   blocksize := 0;
-   retries := 0;
-   repeat
-     // attempt to set and read back the fn0 block size.
-     result1 := SDIODeviceReadWriteDirect(@WIFI^.MMC, True, BUS_FUNCTION, SDIO_CCCR_BLKSIZE, WIFI_BAK_BLK_BYTES, nil);
-     result2 := SDIODeviceReadWriteDirect(@WIFI^.MMC, False, BUS_FUNCTION, SDIO_CCCR_BLKSIZE, 1, @blocksize);
-     retries += 1;
-     sleep(1);
-   until ((result1 = MMC_STATUS_SUCCESS) and (result2 = MMC_STATUS_SUCCESS) and (blocksize = WIFI_BAK_BLK_BYTES)) or (retries > 500);
+   //if WIFI_LOG_ENABLED then WIFILogInfo(nil,'Waiting until the backplane is ready');
+   //blocksize := 0;
+   //retries := 0;
+   //repeat
+   //  // attempt to set and read back the fn0 block size.
+   //  result1 := SDIODeviceReadWriteDirect(@WIFI^.MMC, True, BUS_FUNCTION, SDIO_CCCR_BLKSIZE, WIFI_BAK_BLK_BYTES, nil);
+   //  result2 := SDIODeviceReadWriteDirect(@WIFI^.MMC, False, BUS_FUNCTION, SDIO_CCCR_BLKSIZE, 1, @blocksize);
+   //  retries += 1;
+   //  sleep(1);
+   //until ((result1 = MMC_STATUS_SUCCESS) and (result2 = MMC_STATUS_SUCCESS) and (blocksize = WIFI_BAK_BLK_BYTES)) or (retries > 500);
 
-   if (retries > 500) then
-     WIFILogError(nil, 'the backplane was not ready');
+   //if (retries > 500) then
+   //  WIFILogError(nil, 'the backplane was not ready');
 
    // if we get here we have successfully set the fn0 block size in CCCR and therefore the backplane is up.
 
@@ -2385,7 +2401,7 @@ const
   CID_TYPE_SHIFT = 28;
 
 var
- buf : array[0..511] of byte;
+ buf : PByte;
  i, coreid, corerev : integer;
  addr : longint;
  addressbytes : array[1..4] of byte;
@@ -2402,8 +2418,13 @@ begin
 
  Result := MMC_STATUS_INVALID_PARAMETER;
 
- // set backplane window
- fillchar(buf, sizeof(buf), 0);
+ buf := DMABufferAllocate(DMAHostGetDefault, Corescansz);
+
+ if not(DMA_CACHE_COHERENT) then
+  begin
+   // Clean Cache (Dest)
+   CleanDataCacheRange(PtrUInt(buf), Corescansz);
+  end;
 
  Result := WIFIDeviceSetBackplaneWindow(WIFI, BAK_BASE_ADDR);
 
@@ -2439,7 +2460,7 @@ begin
 
  try
    // read the core info from the device
-   Result := SDIODeviceReadWriteExtended(@WIFI^.MMC, False, BACKPLANE_FUNCTION, address, true, @buf[0], 8, 64);
+   Result := SDIODeviceReadWriteExtended(@WIFI^.MMC, False, BACKPLANE_FUNCTION, address, true, buf, 8, 64);
    if (Result <> MMC_STATUS_SUCCESS) then
    begin
      WIFILogError(nil, 'Failed to read Core information from the SDIO device.');
@@ -2536,6 +2557,8 @@ begin
        end;
       i := i + 4;
     end;
+
+    DMABufferRelease(buf);
 
     if WIFI_LOG_ENABLED then WIFILogInfo(nil, 'Corescan completed.');
 
@@ -2897,7 +2920,7 @@ function WIFIDeviceDownloadFirmware(WIFI : PWIFIDevice) : Longword;
 var
  FirmwareFile : file of byte;
  firmwarep : pbyte;
- comparebuf : pbyte;
+ //comparebuf : pbyte;
  off : longword;
  fsize : longword;
  i : integer;
@@ -2957,6 +2980,13 @@ begin
   reset(FirmwareFile);
   fsize := filesize(FirmwareFile);
   firmwarep := DMABufferAllocate(DMAHostGetDefault, fsize);
+
+  if not(DMA_CACHE_COHERENT) then
+   begin
+    // Clean Cache (Dest)
+    CleanDataCacheRange(PtrUInt(firmwarep), fsize);
+   end;
+  
   blockread(FirmwareFile, firmwarep^, fsize);
   closefile(FirmwareFile);
 
@@ -2979,14 +3009,13 @@ begin
   if (fsize mod 4 <> 0) then
     fsize := ((fsize div 4) + 1) * 4;
 
-  getmem(comparebuf, fsize);
+  //getmem(comparebuf, fsize);
 
   {$ifdef CYW43455_DEBUG}
   if WIFI_LOG_ENABLED then WIFILogDebug(nil, 'Bytes to transfer: ' + inttostr(fsize));
   {$endif}
 
   bytestransferred := 0;
-  dodumpregisters := false;
 
   while bytestransferred < fsize do
   begin
@@ -3030,6 +3059,13 @@ begin
     fsize := ((fsize div 4) + 1) * 4;
 
   firmwarep := DMABufferAllocate(DMAHostGetDefault, fsize);
+  
+  if not(DMA_CACHE_COHERENT) then
+   begin
+    // Clean Cache (Dest)
+    CleanDataCacheRange(PtrUInt(firmwarep), fsize);
+   end;
+  
   BlockRead(FirmwareFile, FirmwareP^, FileSize(FirmwareFile));
 
   fsize := Condense(PChar(FirmwareP), Filesize(FirmwareFile)); // note we deliberately *don't* use fsize here!
