@@ -40,8 +40,8 @@ const
   WLC_SET_SSID = 26;
   WLC_SET_BSSID = 24;
 
-  CYW43455_SDIO_DESCRIPTION = 'Cypress CYW34355 WIFI Device';
-  CYW43455_NETWORK_DESCRIPTION = 'Cypress 43455 SDIO Wireless Network Adapter';
+  CYW43455_SDIO_DESCRIPTION = 'Cypress CYW34355 WIFI Device (Testing)';
+  CYW43455_NETWORK_DESCRIPTION = 'Cypress 43455 SDIO Wireless Network Adapter (Testing)';
 
   //cyw43455 event flags bits (see whd_event_msg record)
   CYW43455_EVENT_FLAG_LINK        = $01;  // bit 0
