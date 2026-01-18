@@ -95,11 +95,10 @@ static void l2_packet_receive(int sock, void *eloop_ctx, void *sock_ctx)
 	{
 		dl_list_del(&rawpacket->list);
 
-		// packet is only passed in if the connection is no finalized
-		// otherwise we simply dispose of it.
-		if (! SupplicantOperatingState)
-			l2->rx_callback(l2->rx_callback_ctx, rawpacket->srcaddr,
-				rawpacket->packetbuf, rawpacket->packetlen);
+		wpa_printf(MSG_DEBUG, "Ultibodriver: L2 packet receive processing packet\n");
+
+		l2->rx_callback(l2->rx_callback_ctx, rawpacket->srcaddr,
+			rawpacket->packetbuf, rawpacket->packetlen);
 
 		if (rawpacket != &ultiborawpacketreceivequeue)		
 		  os_free(rawpacket);
