@@ -208,10 +208,6 @@ void ultibo_driver_new_packet_data(const u8 *src_addr, void *packetbuf, u16 len)
 {
 	struct ultiborawpacket* rawpacket;
 
-	//if we are finished, throw away any packets being added.
-	if (SupplicantOperatingState) 
-	  return;
-
 	wpa_printf(MSG_DEBUG, "Ultibodriver: raw packet data received into supplicant queue; len=%d\n", len);
 	rawpacket = os_zalloc(sizeof(struct ultiborawpacket));
 	if (rawpacket == NULL) {
