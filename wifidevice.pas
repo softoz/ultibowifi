@@ -2446,7 +2446,7 @@ function WIFIDeviceDownloadFirmware(Network: PCYW43455Network): Longword;
 var
  firmwarep: pbyte;
  off: longword;
- fsize: LongInt;
+ fsize: longword;
  i: integer;
  lastramvalue: longword;
  chunksize: LongInt;
