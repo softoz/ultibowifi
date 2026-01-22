@@ -104,10 +104,9 @@ const
   DOT11_IE_ID_RSN = 48;
 
   BUS_FUNCTION = 0;
-  BACKPLANE_FUNCTION = 1;
-  WLAN_FUNCTION = 2;
+  //BACKPLANE_FUNCTION = 1; // No longer required
+  //WLAN_FUNCTION = 2; // No longer required
 
-  RECEIVE_BUFFER_DEFAULT_BLOCK_SIZE = 512;
   WLC_SET_PASSIVE_SCAN = 49;
 
   // sdio core regs
@@ -651,6 +650,7 @@ type
   TCYW43455WorkerThread = class(TThread)
   private
     FNetwork: PCYW43455Network;
+    FMaxBlockSize: LongWord;
 
     FRequestQueueP: PWIFIRequestItem;
     FLastRequestQueueP: PWIFIRequestItem;
@@ -739,7 +739,6 @@ type
 
    TXBuffer: PIOCTL_MSG;
    RXBuffer: PIOCTL_MSG;
-   DMABuffer: Pointer;
    DMAAlignment: LongWord;
 
    JoinCompleted: Boolean;
@@ -1131,14 +1130,12 @@ begin
       // Allocate buffers
       PCYW43455Network(Network)^.TXBuffer := DMABufferAllocate(DMAHostGetDefault, SizeOf(IOCTL_MSG));
       PCYW43455Network(Network)^.RXBuffer := DMABufferAllocate(DMAHostGetDefault, SizeOf(IOCTL_MSG));
-      PCYW43455Network(Network)^.DMABuffer := DMABufferAllocate(DMAHostGetDefault,IOCTL_MAX_BLKLEN);
 
       if not(DMA_CACHE_COHERENT) then
       begin
         {Clean Cache (Dest)}
         CleanDataCacheRange(PtrUInt(PCYW43455Network(Network)^.TXBuffer), SizeOf(IOCTL_MSG));
         CleanDataCacheRange(PtrUInt(PCYW43455Network(Network)^.RXBuffer), SizeOf(IOCTL_MSG));
-        CleanDataCacheRange(PtrUInt(PCYW43455Network(Network)^.DMABuffer), IOCTL_MAX_BLKLEN);
       end;
 
       // Get DMA properties
@@ -1355,7 +1352,6 @@ begin
       {Free Buffers}
       DMABufferRelease(PCYW43455Network(Network)^.TXBuffer);
       DMABufferRelease(PCYW43455Network(Network)^.RXBuffer);
-      DMABufferRelease(PCYW43455Network(Network)^.DMABuffer);
 
       {Destroy Up Semaphore}
       SemaphoreDestroy(PCYW43455Network(Network)^.NetworkUpSignal);
@@ -1756,9 +1752,9 @@ begin
    {$ENDIF}
 
    chipid := 0;
-   Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,False,BACKPLANE_FUNCTION,0,  0, @chipid);
-   Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,False,BACKPLANE_FUNCTION,1,  0, pbyte(@chipid)+1);
-   Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,False,BACKPLANE_FUNCTION,2,  0, @chipidrev);
+   Result:=SDIOFunctionReadByte(Network^.Func1, 0, @chipid);
+   Result:=SDIOFunctionReadByte(Network^.Func1, 1, pbyte(@chipid)+1);
+   Result:=SDIOFunctionReadByte(Network^.Func1, 2, @chipidrev);
    chipidrev := chipidrev and $f;
    if (Result = MMC_STATUS_SUCCESS) then
    begin
@@ -1805,22 +1801,19 @@ begin
    WIFIDeviceRamScan(Network);
 
    // Set clock on function 1
-   Result := SDIODeviceReadWriteDirect(Network^.Func1^.MMC, True, BACKPLANE_FUNCTION, BAK_CHIP_CLOCK_CSR_REG, 0, nil);
+   Result := SDIOFunctionWriteByte(Network^.Func1, BAK_CHIP_CLOCK_CSR_REG, 0);
    if (Result <> MMC_STATUS_SUCCESS) then
      WIFILogError(nil, 'CYW43455: Unable to update config at chip clock csr register');
    MicrosecondDelay(10);
 
    // check active low power clock availability
-
-   Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,True, BACKPLANE_FUNCTION, BAK_CHIP_CLOCK_CSR_REG, 0, nil);
-   sleep(1);
-   Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,True, BACKPLANE_FUNCTION, BAK_CHIP_CLOCK_CSR_REG, Nohwreq or ReqALP, nil);
+   Result:=SDIOFunctionWriteByte(Network^.Func1, BAK_CHIP_CLOCK_CSR_REG, Nohwreq or ReqALP);
 
    // now we keep reading them until we have some availability
    bytevalue := 0;
    while (bytevalue and (HTavail or ALPavail) = 0) do
    begin
-     Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,False, BACKPLANE_FUNCTION, BAK_CHIP_CLOCK_CSR_REG, 0, @bytevalue);
+     Result:=SDIOFunctionReadByte(Network^.Func1, BAK_CHIP_CLOCK_CSR_REG, @bytevalue);
      if (Result <> MMC_STATUS_SUCCESS) then
        WIFILogError(nil, 'CYW43455: failed to read clock settings');
      MicrosecondDelay(10);
@@ -1832,14 +1825,14 @@ begin
 
    // finally we can clear active low power request. Not sure if any of this is needed to be honest.
    if WIFI_LOG_ENABLED then WIFILogInfo(nil, 'CYW43455: clearing active low power clock request');
-   Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,True, BACKPLANE_FUNCTION, BAK_CHIP_CLOCK_CSR_REG, Nohwreq or ForceALP, nil);
+   Result:=SDIOFunctionWriteByte(Network^.Func1, BAK_CHIP_CLOCK_CSR_REG, Nohwreq or ForceALP);
 
    MicrosecondDelay(65);
 
   WIFIDeviceSetBackplaneWindow(Network, Network^.chipcommon);
 
   if WIFI_LOG_ENABLED then WIFILogInfo(nil, 'CYW43455: Disable pullups');
-  Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,True, BACKPLANE_FUNCTION, gpiopullup, 0, nil);
+  Result:=SDIOFunctionWriteByte(Network^.Func1, gpiopullup, 0);
   if (Result = MMC_STATUS_SUCCESS) then
   begin
    {$IF DEFINED(CYW43455_DEBUG) or DEFINED(NETWORK_DEBUG)}
@@ -1849,7 +1842,7 @@ begin
   else
     WIFILogError(nil, 'CYW43455: Failed to disable SDIO extra pullups');
 
-  Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,True, BACKPLANE_FUNCTION, Gpiopulldown, 0, nil);
+  Result:=SDIOFunctionWriteByte(Network^.Func1, Gpiopulldown, 0);
   if (Result = MMC_STATUS_SUCCESS) then
   begin
    {$IF DEFINED(CYW43455_DEBUG) or DEFINED(NETWORK_DEBUG)}
@@ -1903,9 +1896,9 @@ begin
                   + inttohex((addr shr 24) and $ff, 8));
  {$endif}
 
- Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,True, BACKPLANE_FUNCTION, BAK_WIN_ADDR_REG, (addr shr 8) and $ff,nil);
- Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,True, BACKPLANE_FUNCTION, BAK_WIN_ADDR_REG+1,(addr shr 16) and $ff,nil);
- Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,True, BACKPLANE_FUNCTION, BAK_WIN_ADDR_REG+2,(addr shr 24) and $ff,nil);
+ Result:=SDIOFunctionWriteByte(Network^.Func1, BAK_WIN_ADDR_REG, (addr shr 8) and $ff);
+ Result:=SDIOFunctionWriteByte(Network^.Func1, BAK_WIN_ADDR_REG + 1, (addr shr 16) and $ff);
+ Result:=SDIOFunctionWriteByte(Network^.Func1, BAK_WIN_ADDR_REG + 2, (addr shr 24) and $ff);
 
  if (Result = MMC_STATUS_SUCCESS) then
  begin
@@ -1956,13 +1949,13 @@ begin
  Result := WIFIDeviceSetBackplaneWindow(Network, BAK_BASE_ADDR);
 
  // read 32 bits containing chip id and other info
- Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,False,BACKPLANE_FUNCTION,0,  0, pbyte(@chipidbuf));
+ Result:=SDIOFunctionReadByte(Network^.Func1, 0, pbyte(@chipidbuf));
  if (Result <> MMC_STATUS_SUCCESS) then
     WIFILogError(nil, 'CYW43455: failed to read the first byte of the chip id');
 
- Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,False,BACKPLANE_FUNCTION,1,  0, pbyte(@chipidbuf)+1);
- Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,False,BACKPLANE_FUNCTION,2,  0, pbyte(@chipidbuf)+2);
- Result:=SDIODeviceReadWriteDirect(Network^.Func1^.MMC,False,BACKPLANE_FUNCTION,2,  0, pbyte(@chipidbuf)+3);
+ Result:=SDIOFunctionReadByte(Network^.Func1, 1, pbyte(@chipidbuf) + 1);
+ Result:=SDIOFunctionReadByte(Network^.Func1, 2, pbyte(@chipidbuf) + 2);
+ Result:=SDIOFunctionReadByte(Network^.Func1, 3, pbyte(@chipidbuf) + 3);
 
  {$IF DEFINED(CYW43455_DEBUG) or DEFINED(NETWORK_DEBUG)}
  chipid := chipidbuf  and CID_ID_MASK;
@@ -1973,7 +1966,7 @@ begin
 
  // read pointer to core info structure.
  // 63*4 is yucky. Could do with a proper address definition for it.
- Result := SDIODeviceReadWriteExtended(Network^.Func1^.MMC, False, BACKPLANE_FUNCTION, 63*4, true, @addressbytes[1], 0, 4);
+ Result := SDIOFunctionRead(Network^.Func1, 63*4, @addressbytes[1], 4);
  address := plongint(@addressbytes[1])^;
 
  {$IF DEFINED(CYW43455_DEBUG) or DEFINED(NETWORK_DEBUG)}
@@ -1987,7 +1980,7 @@ begin
 
  try
    // read the core info from the device
-   Result := SDIODeviceReadWriteExtended(Network^.Func1^.MMC, False, BACKPLANE_FUNCTION, address, true, buf, 8, 64);
+   Result := SDIOFunctionRead(Network^.Func1, address, buf, corescansz);
    if (Result <> MMC_STATUS_SUCCESS) then
    begin
      WIFILogError(nil, 'CYW43455: Failed to read Core information from the SDIO device.');
@@ -2115,46 +2108,43 @@ begin
 end;
 
 function cfgreadl(Network: PCYW43455Network; addr: longword; trace: string = ''): longword;
+var
+  Res: LongWord;
 begin
-  PLongWord(Network^.DMABuffer)^ := 0;
+  Result := 0;
 
-  Result := SDIODeviceReadWriteExtended(Network^.Func1^.MMC, False, BACKPLANE_FUNCTION, (addr and $1ffff) or $8000, true, Network^.DMABuffer, 0, 4);
-  if (Result <> MMC_STATUS_SUCCESS) then
-    WIFILogError(nil, 'CYW43455: Failed to read config item 0x'+inttohex(addr, 8) + ' result='+inttostr(Result));
-
-  Result := PLongWord(Network^.DMABuffer)^;
+  Res := SDIOFunctionReadLong(Network^.Func1, (addr and $1ffff) or $8000, @Result);
+  if Res <> MMC_STATUS_SUCCESS then
+    WIFILogError(nil, 'CYW43455: Failed to read config item 0x' + inttohex(addr, 8) + ' Res=' + MMCStatusToString(Res));
 end;
 
 procedure cfgwritel(Network: PCYW43455Network; addr: longword; v: longword; trace: string = '');
 var
-  Result: longword;
+  Res: LongWord;
 begin
- PLongWord(Network^.DMABuffer)^ := v;
-
- Result := SDIODeviceReadWriteExtended(Network^.Func1^.MMC, True, BACKPLANE_FUNCTION, (addr and $1ffff) or $8000, true, Network^.DMABuffer, 0, 4);
- if (Result <> MMC_STATUS_SUCCESS) then
-   WIFILogError(nil,'CYW43455: Failed to update config item 0x'+inttohex(addr, 8));
+ Res := SDIOFunctionWriteLong(Network^.Func1, (addr and $1ffff) or $8000, v);
+ if Res <> MMC_STATUS_SUCCESS then
+   WIFILogError(nil,'CYW43455: Failed to update config item 0x' + inttohex(addr, 8) + ' Res=' + MMCStatusToString(Res));
 end;
 
 procedure cfgw(Network: PCYW43455Network; offset: longword; value: byte);
 var
-  Result: longword;
+  Res: longword;
 begin
-  Result := SDIODeviceReadWriteDirect(Network^.Func1^.MMC, True, BACKPLANE_FUNCTION, offset, value, nil);
-  if (Result <> MMC_STATUS_SUCCESS) then
-    WIFILogError(nil, 'CYW43455: Failed to write config item 0x'+inttohex(offset, 8));
+  Res := SDIOFunctionWriteByte(Network^.Func1, offset, value);
+  if Res <> MMC_STATUS_SUCCESS then
+    WIFILogError(nil, 'CYW43455: Failed to write config item 0x'+inttohex(offset, 8) + ' Res=' + MMCStatusToString(Res));
 end;
 
 function cfgr(Network: PCYW43455Network; offset: longword): byte;
 var
   Res: longword;
-  value: byte;
 begin
-  Res := SDIODeviceReadWriteDirect(Network^.Func1^.MMC, False, BACKPLANE_FUNCTION, offset, 0, @value);
-  if (Res <> MMC_STATUS_SUCCESS) then
-    WIFILogError(nil, 'CYW43455: Failed to read config item 0x'+inttohex(offset, 8));
+  Result := 0;
 
-  Result := value;
+  Res := SDIOFunctionReadByte(Network^.Func1, offset, @Result);
+  if (Res <> MMC_STATUS_SUCCESS) then
+    WIFILogError(nil, 'CYW43455: Failed to read config item 0x'+inttohex(offset, 8) + ' Res=' + MMCStatusToString(Res));
 end;
 
 procedure sbdisable(Network: PCYW43455Network; regs: longword; pre: word; ioctl: word);
@@ -2213,14 +2203,7 @@ begin
     if (len >= 4) then
       addr := addr or $8000;
 
-    if (n < Network^.Func1^.MaxBlockSize) then
-      Res := SDIODeviceReadWriteExtended(Network^.Func1^.MMC, True, BACKPLANE_FUNCTION, addr, true, buf, 0, n)
-    else
-    begin
-      Res := SDIODeviceReadWriteExtended(Network^.Func1^.MMC, True, BACKPLANE_FUNCTION, addr, true, buf, n div Network^.Func1^.MaxBlockSize, Network^.Func1^.MaxBlockSize);
-      n := (n div Network^.Func1^.MaxBlockSize) * Network^.Func1^.MaxBlockSize;
-    end;
-
+    Res := SDIOFunctionReadWriteExtended(Network^.Func1, write, addr, true, buf, n);
     if (Res <> MMC_STATUS_SUCCESS) then
     begin
       WIFILogError(nil, 'CYW43455: Error transferring to/from backplane 0x' + inttohex(addr,8) + ' ' + inttostr(n) + 'bytes (write='+booltostr(write, true)+')');
@@ -2466,7 +2449,7 @@ begin
   // zero out an address of some sort which is at the top of the ram?
   lastramvalue := 0;
   WIFIDeviceSetBackplaneWindow(Network, Network^.rambase + Network^.socramsize - 4);
-  SDIODeviceReadWriteExtended(Network^.Func1^.MMC, True, BACKPLANE_FUNCTION, (Network^.rambase + Network^.socramsize - 4) and $7fff{ or $8000}, true, @lastramvalue, 0, 4);
+  SDIOFunctionWrite(Network^.Func1, (Network^.rambase + Network^.socramsize - 4) and $7fff{ or $8000}, @lastramvalue, 4);
 
   if WIFI_LOG_ENABLED then WIFILogInfo(nil, 'CYW43455: Starting WIFI firmware load...');
 
@@ -2753,7 +2736,7 @@ begin
 
   // It seems like we need to execute a read first to kick things off. If we don't do this the first
   // IOCTL command response will be an empty one rather than the one for the IOCTL we sent.
-  if (SDIODeviceReadWriteExtended(Network^.Func2^.MMC, False, WLAN_FUNCTION, BAK_BASE_ADDR and $1ffff, false, Network^.RXBuffer, 0, 64) <> MMC_STATUS_SUCCESS) then
+  if (SDIOFunctionReadWriteExtended(Network^.Func2, False, BAK_BASE_ADDR and $1ffff, false, Network^.RXBuffer, 64) <> MMC_STATUS_SUCCESS) then
      WIFILogError(nil, 'CYW43455: Unsuccessful initial read from WIFI function 2 (packets)')
   else
   begin
@@ -3269,6 +3252,10 @@ begin
 
   Result := ERROR_SUCCESS;
 
+  {Check Status}
+  if Network^.Network.NetworkStatus <> NETWORK_STATUS_DOWN then
+    Exit;
+
   WIFI_USE_SUPPLICANT := true;
 
   //the wpa_supplicant must now be initialized, once we have a mac address (which is done in wirelessinit)
@@ -3313,6 +3300,12 @@ begin
   // Get Wireless Device
   Network := PCYW43455Network(NetworkDeviceFindByDescription(CYW43455_NETWORK_DESCRIPTION));
   if Network = nil then Exit;
+
+  Result := MMC_STATUS_SUCCESS;
+
+  {Check Status}
+  if Network^.Network.NetworkStatus <> NETWORK_STATUS_DOWN then
+    Exit;
 
   WIFI_USE_SUPPLICANT := false;
 
@@ -3454,11 +3447,15 @@ begin
     // Set join completed
     Network^.JoinCompleted := True;
 
-    {Set Status to Up}
-    Network^.Network.NetworkStatus := NETWORK_STATUS_UP;
+    {Check Status}
+    if Network^.Network.NetworkStatus <> NETWORK_STATUS_UP then
+    begin
+      {Set Status to Up}
+      Network^.Network.NetworkStatus := NETWORK_STATUS_UP;
 
-    {Notify the Status}
-    NotifierNotify(@Network^.Network.Device, DEVICE_NOTIFICATION_UP);
+      {Notify the Status}
+      NotifierNotify(@Network^.Network.Device, DEVICE_NOTIFICATION_UP);
+    end;
   end
   else
   begin
@@ -4016,6 +4013,7 @@ begin
   ThreadSetName(ThreadGetCurrent, 'CYW43455 Worker Thread');
 
   FNetwork^.txseq := 0;
+  FMaxBlockSize := FNetwork^.Func2^.MaxBlockSize;
 
   try
 
@@ -4058,7 +4056,7 @@ begin
 
          if (ResponseP <> nil) and (NetworkEntryP <> nil) and (istatus and $40 = $40) then
          begin
-           if SDIODeviceReadWriteExtended(FNetwork^.Func2^.MMC, False, WLAN_FUNCTION, BAK_BASE_ADDR and $1ffff, false, ResponseP, 0, IOCTL_LEN_BYTES) <> MMC_STATUS_SUCCESS then
+           if SDIOFunctionReadWriteExtended(FNetwork^.Func2, False, BAK_BASE_ADDR and $1ffff, false, ResponseP, IOCTL_LEN_BYTES) <> MMC_STATUS_SUCCESS then
            begin
              WIFILogError(nil, 'CYW43455: Error trying to read SDPCM header');
              exit;
@@ -4080,8 +4078,8 @@ begin
 
                if (ResponseP^.Len > IOCTL_LEN_BYTES) then
                begin
-                 blockcount := ResponseP^.Len div 512;
-                 remainder := ResponseP^.Len mod 512;
+                 blockcount := ResponseP^.Len div FMaxBlockSize;
+                 remainder := ResponseP^.Len mod FMaxBlockSize;
 
                  if blockcount = 0 then
                    Dec(remainder, IOCTL_LEN_BYTES);
@@ -4099,13 +4097,13 @@ begin
                  if (blockcount > 0) then
                  begin
                    // Read the rest of first block to maintain alignment for DMA (PIO)
-                   if SDIODeviceReadWriteExtended(FNetwork^.Func2^.MMC, False, WLAN_FUNCTION, BAK_BASE_ADDR and $1ffff, false, pbyte(responsep) + IOCTL_LEN_BYTES, 0, 512 - IOCTL_LEN_BYTES) <> MMC_STATUS_SUCCESS then
+                   if SDIOFunctionReadWriteExtended(FNetwork^.Func2, False, BAK_BASE_ADDR and $1ffff, false, pbyte(responsep) + IOCTL_LEN_BYTES, FMaxBlockSize - IOCTL_LEN_BYTES) <> MMC_STATUS_SUCCESS then
                      WIFILogError(nil, 'CYW43455: Error trying to read first block for ioctl response');
 
                    if (blockcount > 1) then
                    begin
                      // Read the full blocks as a single request (DMA)
-                     if SDIODeviceReadWriteExtended(FNetwork^.Func2^.MMC, False, WLAN_FUNCTION, BAK_BASE_ADDR and $1ffff, false, pbyte(responsep) + 512, blockcount - 1, 512) <> MMC_STATUS_SUCCESS then
+                     if SDIOFunctionReadWriteExtended(FNetwork^.Func2, False, BAK_BASE_ADDR and $1ffff, false, pbyte(responsep) + FMaxBlockSize, (blockcount - 1) * FMaxBlockSize) <> MMC_STATUS_SUCCESS then
                        WIFILogError(nil, 'CYW43455: Error trying to read blocks for ioctl response');
                    end;
                  end;
@@ -4118,7 +4116,7 @@ begin
                      offset := 0;
 
                    // Read the partial last block (PIO)
-                   if SDIODeviceReadWriteExtended(FNetwork^.Func2^.MMC, False, WLAN_FUNCTION, BAK_BASE_ADDR and $1ffff, false, pbyte(responsep) + offset + blockcount * 512, 0, remainder) <> MMC_STATUS_SUCCESS then
+                   if SDIOFunctionReadWriteExtended(FNetwork^.Func2, False, BAK_BASE_ADDR and $1ffff, false, pbyte(responsep) + offset + blockcount * FMaxBlockSize, remainder) <> MMC_STATUS_SUCCESS then
                      WIFILogError(nil, 'CYW43455: Error trying to read remainder for ioctl response (len='+inttostr(responsep^.len)+')');
                  end;
 
@@ -4203,7 +4201,7 @@ begin
                    WIFILogError(nil, 'CYW43455: Could not read a large message into an undersized buffer (len='+inttostr(responsep^.len)+')');
 
                // read next sdpcm header (may not be one present in which case everything will be zero including length)
-               if (not isFinished) and (SDIODeviceReadWriteExtended(FNetwork^.Func2^.MMC, False, WLAN_FUNCTION, BAK_BASE_ADDR and $1ffff, false, ResponseP, 0, IOCTL_LEN_BYTES) <> MMC_STATUS_SUCCESS) then
+               if (not isFinished) and (SDIOFunctionReadWriteExtended(FNetwork^.Func2, False, BAK_BASE_ADDR and $1ffff, false, ResponseP, IOCTL_LEN_BYTES) <> MMC_STATUS_SUCCESS) then
                begin
                  WIFILogError(nil, 'CYW43455: Error trying to read SDPCM header (repeat)');
                  exit;
@@ -4302,8 +4300,8 @@ begin
 
                 // calculate transmission sizes
                 txlen := PIOCTL_MSG(PacketP^.Buffer)^.len;
-                blockcount := txlen div 512;
-                remainder := txlen mod 512;
+                blockcount := txlen div FMaxBlockSize;
+                remainder := txlen mod FMaxBlockSize;
 
                 //Update Statistics
                 Inc(FNetwork^.Network.TransmitCount);
@@ -4312,15 +4310,15 @@ begin
                 //send data
                 if (blockcount > 0) then
                 begin
-                  if SDIODeviceReadWriteExtended(FNetwork^.Func2^.MMC, True, WLAN_FUNCTION,
-                        BAK_BASE_ADDR and $1ffff, false, PacketP^.Buffer, blockcount, 512) <> MMC_STATUS_SUCCESS then
+                  if SDIOFunctionReadWriteExtended(FNetwork^.Func2, True,
+                        BAK_BASE_ADDR and $1ffff, false, PacketP^.Buffer, blockcount * FMaxBlockSize) <> MMC_STATUS_SUCCESS then
                           WIFILogError(nil, 'CYW43455: Failed to transmit packet data blocks txseq='+inttostr(FNetwork^.txseq)+' lastcredit='+inttostr(LastCredit));
                 end;
 
                 if (remainder > 0) then
                 begin
-                  if SDIODeviceReadWriteExtended(FNetwork^.Func2^.MMC, True, WLAN_FUNCTION,
-                        BAK_BASE_ADDR and $1ffff, false, PacketP^.Buffer + blockcount*512, 0, remainder) <> MMC_STATUS_SUCCESS then
+                  if SDIOFunctionReadWriteExtended(FNetwork^.Func2, True,
+                        BAK_BASE_ADDR and $1ffff, false, PacketP^.Buffer + blockcount * FMaxBlockSize, remainder) <> MMC_STATUS_SUCCESS then
                           WIFILogError(nil, 'CYW43455: Failed to transmit packet data remainder txseq='+inttostr(FNetwork^.txseq)+' lastcredit='+inttostr(LastCredit));
                 end;
 
@@ -4906,16 +4904,20 @@ begin
         WIFILogInfo(nil, 'CYW43455: Successfully set the wsec_key var key=' + k.tostring);
     end;
 
-  {Set Status to Up}
-  Network^.Network.NetworkStatus := NETWORK_STATUS_UP;
+  {Check Status}
+  if Network^.Network.NetworkStatus <> NETWORK_STATUS_UP then
+  begin
+    {Set Status to Up}
+    Network^.Network.NetworkStatus := NETWORK_STATUS_UP;
 
-  {Notify the Status}
-  NotifierNotify(@Network^.Network.Device, DEVICE_NOTIFICATION_UP);
+    {Notify the Status}
+    NotifierNotify(@Network^.Network.Device, DEVICE_NOTIFICATION_UP);
 
-  {signal network joined}
-  SemaphoreSignal(Network^.NetworkUpSignal);
+    {signal network joined}
+    SemaphoreSignal(Network^.NetworkUpSignal);
 
-  WIFILogInfo(nil, 'CYW43455: The WIFI network status is up');
+    WIFILogInfo(nil, 'CYW43455: The WIFI network status is up');
+  end;
 end;
 
 procedure UltiboEAPOLComplete; cdecl;
@@ -5139,7 +5141,6 @@ begin
  {CYW43455}
  Network^.TXBuffer := nil;
  Network^.RXBuffer := nil;
- Network^.DMABuffer := nil;
  Network^.DMAAlignment := 0;
 
  {Register Network}
